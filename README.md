@@ -1,18 +1,15 @@
-# ДЗ 1 по Prometheus. Промышленное развертывание промышленных приложений. Дедлайн 25.01.26
+# ДЗ по логам и трейсам. Промышленное развертывание промышленных приложений. Дедлайн 03.02.26
 
 ## Выполнила Кухтина Юлия Егоровна, БПИ224
 
 ## Выполненные шаги
 
-### 1. Запускаем миникуб и поднимаем БД в докере
+### 1. Запускаем миникуб и поднимаем все необходимые ресурсы в докере
 Из корневой папки проекта
 ```
 minikube start --cpus=4 --memory=6g  --driver=docker
 docker compose up -d
 ```
-
-Отмечу, что в docker compose для базы появилась настройка для `postgres_exporter`, чтобы собирать метрики с базы данных, после запуска база будет отдавать метрики по адресу `http://localhost:9187/metrics`
-![](screenshots/4.jpg)
 
 ### 2. Запускаем приложение с истио
 Переходим в папку `charts` и устанавливаем и разворачиваем приложение с истио с помощью хельмфайла
@@ -20,118 +17,187 @@ docker compose up -d
 cd charts
 helmfile sync
 ```
-### 3. Запускаем прометеус
-Переходим в папку `prometheus` из корневой папки проекта и запускам прометеус в Docker \
-`docker-compose.yml`
+### 3. Основные изменения для выполнения дз
+
+#### 3.1. promtail был развернут как отдельный контейнер в поде приложения `muffin-wallet`, чтобы собирать логи и отправлять их в `loki` \\
+
+`promtail-configmap.yml`
 ```
-version: '3.8'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: promtail-config
+  namespace: default
+data:
+  config.yaml: |
+    server:
+      http_listen_port: 9080
+      grpc_listen_port: 0
 
-services:
-  prometheus:
-    image: prom/prometheus:latest
-    network_mode: host
-    container_name: prometheus
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data_2:/prometheus
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.min-block-duration=120s'
-      - '--storage.tsdb.max-block-duration=120s'
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    network_mode: host
-    restart: unless-stopped
-    volumes:
-      - grafana_data:/var/lib/grafana
-
-volumes:
-  prometheus_data_2:
-  grafana_data:
+    positions:
+      filename: /tmp/positions.yaml
+    
+    clients:
+      - url: http://host.minikube.internal:3100/loki/api/v1/push
+    
+    scrape_configs:
+      - job_name: app-logs
+        pipeline_stages:
+          - regex:
+              expression: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s+(?P<logLevel>[A-Z]+)\s+\[(?P<traceId>[a-f0-9]+),(?P<spanId>[a-f0-9]+)\]'
+          - labels:
+              traceId:
+              logLevel:
+        static_configs:
+          - targets:
+              - localhost
+            labels:
+              job: muffin-wallet
+              __path__: /logs/*.log
 ```
-`prometheus.yml`
+`deployment.yml`
 ```
-global:
-  scrape_interval: 10s
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: release-name-muffin-wallet
+  labels:
+    helm.sh/chart: muffin-wallet-0.1.0
+    app.kubernetes.io/name: muffin-wallet
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "1.1.0"
+    app.kubernetes.io/managed-by: Helm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: muffin-wallet
+      app.kubernetes.io/instance: release-name
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: muffin-wallet
+        app.kubernetes.io/instance: release-name
+    spec:
+      serviceAccountName: muffin-wallet-sa
+      volumes:
+        - name: application-config-volume
+          configMap:
+            name: release-name-muffin-wallet
+        - name: nginx-config-volume
+          configMap:
+            name: nginx-config
+        - name: log-volume
+          emptyDir: { }
+        - name: promtail-config
+          configMap:
+            name: promtail-config
+      containers:
+        - name: nginx-log
+          image: nginx:1.29.3
+          volumeMounts:
+            - name: nginx-config-volume
+              mountPath: /etc/nginx
+            - name: log-volume
+              mountPath: /usr/share/nginx/html
+        - name: promtail
+          image: grafana/promtail:latest
+          args:
+            - -config.file=/etc/promtail/config.yaml
+          volumeMounts:
+            - name: log-volume
+              mountPath: /logs
+            - name: promtail-config
+              mountPath: /etc/promtail
 
-scrape_configs:
-  - job_name: 'muffin-wallet'
-    metrics_path: /actuator/prometheus
-    static_configs:
-      - targets: ['muffin-wallet.com']
-        labels:
-          application: 'muffin-wallet'
-
-  - job_name: 'postgres'
-    static_configs:
-      - targets: [ 'localhost:9187' ]
-
-  - job_name: 'prometheus'
-    static_configs:
-      - targets: ['localhost:9090']
+        - name: muffin-wallet
+          image: "yuulkht/muffin-wallet:1.0.4"
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+          volumeMounts:
+            - name: application-config-volume
+              mountPath: /app/config
+            - name: log-volume
+              mountPath: /logs
+          envFrom:
+            - secretRef:
+                name: release-name-muffin-wallet
+            - configMapRef:
+                name: release-name-muffin-wallet-env
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8081
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8081
+            initialDelaySeconds: 80
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
 ```
 
-запуск:
+#### 3.2. В дз я использовала истио, поэтому скорректировала ServiceEntry в ресурсах истио, чтобы из кластера был доступ к ресурсам, которые я еще развернула в докере (не только база, но и loki, zipkin)
 ```
-docker compose up -d
+apiVersion: networking.istio.io/v1alpha3
+kind: ServiceEntry
+metadata:
+  name: external-postgres
+  namespace: default
+spec:
+  hosts:
+    - host.minikube.internal
+  ports:
+    - name: postgres
+      number: 5432
+      protocol: TCP
+    - name: zipkin
+      number: 9411
+      protocol: HTTP
+    - name: loki
+      number: 3100
+      protocol: HTTP
+    - name: grafana
+      number: 3000
+      protocol: HTTP
+  location: MESH_EXTERNAL
+  resolution: DNS
 ```
+### 4. После запуска
+#### 4.1. Swagger доступен по адресу http://muffin-wallet.com/swagger-ui/index.html
+Он должен быть работоспособен и возвращать корректные коды ответа при выполнении HTTP-запросов, скрин:
+![](screenshots/1.png)
+#### 4.2. Логи приложения доступны на http://muffin-wallet-log.com/logs/app.log 
+![](screenshots/2.png)
 
-#### Необходимо перед запуском проверить, что в докере включена опция "Enable host networking"
-![](screenshots/1.jpg)
+### 5. Используется графана по адресу http://localhost:3000/ с логином/паролем admin/admin
+С помощью нее посмотрим на логи, которые собираются из приложения `muffin-wallet`:
 
-#### По адресу http://muffin-wallet.com/actuator/prometheus можно посмотреть, какие данные приложение предоставляет прометеусу
-![](screenshots/2.jpg)
+#### 5.1. Необходимо добавить data source loki, url: http://host.docker.internal:3100
+![](screenshots/3.png)
+#### 5.2. Экспортировать dashboard из корневой папки проекта с названием `dashboard.json`
+ Таким образом, мы загружаем дашборд, позволяющий просматривать и анализировать логи приложения, а также выполнять поиск по уровню и traceId
+ ![](screenshots/4.png)
 
-#### По адресу http://localhost:9090/targets можно увидеть, что прометеус успешно скрепит данные нашего приложения и базы
-![](screenshots/3.jpg)
+ ### 6. настройка трейсинга
+Трейсинг был настроен путем замены в исходных конфигурациях адреса зипкина с http://localhost:9411/api/v2/spans на http://host.minikube.internal:9411/api/v2/spans \\
 
-### Используется графана по адресу http://localhost:3000/ с логином/паролем admin/admin
+Для этого был скорректирован код сервиса `muffin-currency`, чтобы вынести URL в env-переменную, а в случае `muffin-wallet` просто изменен конфиг \\
+
+После запуска просмотр трейсов доступен в Zipkin по адресу http://localhost:9411/zipkin (можно просто нажать на run query и посмотреть на последние трейсы)
+![](screenshots/5.png)
+![](screenshots/6.png)
 
 
-### 4. Запросы PromQL
-
-4.1. Среднее количество запросов в секунду по сервисам АПИ без уточнения статуса выполнения запроса
-```
-sum by(uri, method, instance) (
-  rate(http_server_requests_seconds_count{uri=~"/v1/.*"}[5m])
-)
-```
-
-4.2. Среднее количество запросов в секунду по сервисам АПИ по статусам ответа
-```
-rate(http_server_requests_seconds_count{uri=~"/v1/.*"}[5m])
-```
-
-4.3. Среднее количество ошибок в секунду по сервисам АПИ со статусами ответа
-```
-sum by(uri, status) (
-  rate(http_server_requests_seconds_count{uri=~"/v1/.*", status=~"5..|4..|3.."}[5m])
-)
-```
-4.4. 99-й персентиль времени ответа HTTP (обработка запросов).
-```
-histogram_quantile(
-  0.99,
-  sum by (le, uri, method) (
-    rate(http_server_requests_seconds_bucket{uri=~"/v1/.*"}[5m])
-  )
-)
-```
-4.5. Активные подключения к БД
-```
-sum(pg_stat_activity_count{state="active", datname="muffin_wallet"}) by (datname, state)
-```
-
-#### Таким образом, из всех получившихся графиков был составлен дашборд, отражающий необходимые по заданию метрики:
-![](screenshots/5.jpg)
-
-#### Дашборд выгружен в формате json, его можно выгрузить в графану из папки `prometheus` в проекте
-
-### 5. Тестирование
+### 7. Нагрузка
 
 #### Для того, чтобы протестировать сбор метрик и дать небольшую нагрузку на приложение, был использован инструмент Jmeter. Для того, чтобы его использовать:
 
