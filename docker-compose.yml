@@ -41,6 +41,9 @@ services:
       - "3000:3000"
     image: grafana/grafana:latest
     container_name: grafana
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana:/etc/grafana/provisioning
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     restart: unless-stopped
@@ -53,3 +56,4 @@ services:
 
 volumes:
   postgres_data:
+  grafana-data:
