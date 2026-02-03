@@ -17,6 +17,10 @@ docker compose up -d
 cd charts
 helmfile sync
 ```
+В отдельном терминале исполняем команду, чтобы получить доступ к приложению в браузере
+```
+minikube tunnel
+```
 ### 3. Основные изменения для выполнения дз
 
 #### 3.1. promtail был развернут как отдельный контейнер в поде приложения `muffin-wallet`, чтобы собирать логи и отправлять их в `loki` \\
@@ -44,7 +48,7 @@ data:
       - job_name: app-logs
         pipeline_stages:
           - regex:
-              expression: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s+(?P<logLevel>[A-Z]+)\s+\[(?P<traceId>[a-f0-9]+),(?P<spanId>[a-f0-9]+)\]'
+              expression: ^(?P<timestamp>\S+)\s+(?P<logLevel>INFO|ERROR|WARN|DEBUG)\s+\[(?P<traceId>[a-f0-9]*),(?P<spanId>[a-f0-9]*)\]
           - labels:
               traceId:
               logLevel:
@@ -186,6 +190,8 @@ spec:
 #### 5.2. Экспортировать dashboard из корневой папки проекта с названием `dashboard.json`
  Таким образом, мы загружаем дашборд, позволяющий просматривать и анализировать логи приложения, а также выполнять поиск по уровню и traceId
  ![](screenshots/4.png)
+ А вот пример с просмотром логов, содержащих ошибку:
+ ![](screenshots/7.png)
 
  ### 6. настройка трейсинга
 Трейсинг был настроен путем замены в исходных конфигурациях адреса зипкина с http://localhost:9411/api/v2/spans на http://host.minikube.internal:9411/api/v2/spans \\

@@ -19,7 +19,7 @@ data:
       - job_name: app-logs
         pipeline_stages:
           - regex:
-              expression: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\s+(?P<logLevel>[A-Z]+)\s+\[(?P<traceId>[a-f0-9]+),(?P<spanId>[a-f0-9]+)\]'
+              expression: ^(?P<timestamp>\S+)\s+(?P<logLevel>INFO|ERROR|WARN|DEBUG)\s+\[(?P<traceId>[a-f0-9]*),(?P<spanId>[a-f0-9]*)\]
           - labels:
               traceId:
               logLevel:
